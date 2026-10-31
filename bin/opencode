@@ -1,0 +1,92 @@
+#!/bin/bash
+# Open Design -> OpenCode 2.x 命令行适配层
+#
+# Open Design 0.26.x 仍按 OpenCode 1.x 的接口调用 CLI，会传 2.x 已删除的参数：
+#   --dir <dir>                     1.x: 指定工作目录      2.x: 已删除
+#   --pure                          1.x: 不加载外部插件     2.x: 已删除
+#   --dangerously-skip-permissions  1.x: 跳过权限确认       2.x: 改名为 --auto
+#   models --verbose                1.x: 输出模型元数据     2.x: 无 --verbose
+#
+# 本脚本把 1.x 的调用翻译成 2.x 可执行的调用，其余参数原样转发。
+# 事件流（run --format json）两代格式一致，因此无需转换输出。
+
+set -u
+
+# 真实 OpenCode 2.x 可执行文件：优先环境变量，其次默认安装位置，最后走 PATH。
+resolve_v2() {
+    if [ -n "${OPENCODE_V2_BIN:-}" ] && [ -x "$OPENCODE_V2_BIN" ]; then
+        printf '%s\n' "$OPENCODE_V2_BIN"
+        return 0
+    fi
+    local self
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    local candidate
+    for candidate in "$HOME/.opencode/bin/opencode" "/opt/homebrew/bin/opencode" "/usr/local/bin/opencode"; do
+        [ -x "$candidate" ] || continue
+        [ "$candidate" = "$self" ] && continue
+        case "$candidate" in
+            */opencode-adapter/*) continue ;;
+        esac
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+if ! V2="$(resolve_v2)"; then
+    echo "opencode-adapter: 未找到 OpenCode 2.x 可执行文件，请设置 OPENCODE_V2_BIN" >&2
+    exit 127
+fi
+
+sub="${1:-}"
+
+case "$sub" in
+    --version|-v)
+        # 直接透传真实版本号（2.x），让调用方按 2.x 的能力集工作
+        exec "$V2" --version
+        ;;
+    models)
+        shift
+        filtered=()
+        for arg in "$@"; do
+            [ "$arg" = "--verbose" ] && continue
+            filtered+=("$arg")
+        done
+        exec "$V2" models "${filtered[@]+"${filtered[@]}"}"
+        ;;
+    run)
+        shift
+        workdir=""
+        translated=()
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --dir)
+                    workdir="${2:-}"
+                    shift 2 || break
+                    ;;
+                --pure)
+                    shift
+                    ;;
+                --dangerously-skip-permissions)
+                    translated+=(--auto)
+                    shift
+                    ;;
+                *)
+                    translated+=("$1")
+                    shift
+                    ;;
+            esac
+        done
+        if [ -n "$workdir" ]; then
+            cd "$workdir" 2>/dev/null || {
+                echo "opencode-adapter: 无法进入目录 $workdir" >&2
+                exit 1
+            }
+        fi
+        # --standalone：每次运行起一个私有服务，避免抢占/复用桌面端后台服务
+        exec "$V2" run --standalone "${translated[@]+"${translated[@]}"}"
+        ;;
+    *)
+        exec "$V2" "$@"
+        ;;
+esac
